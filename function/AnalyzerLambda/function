@@ -1,0 +1,339 @@
+import json
+import boto3
+import urllib.parse
+from datetime import datetime, timezone
+from decimal import Decimal
+
+s3 = boto3.client("s3")
+
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name="ap-south-1"
+)
+
+dynamodb = boto3.resource(
+    "dynamodb",
+    region_name="ap-south-1"
+)
+
+TABLE_NAME = "CVAnalysis"
+
+table = dynamodb.Table(TABLE_NAME)
+
+MODEL_ID = "apac.amazon.nova-lite-v1:0"
+
+
+def lambda_handler(event, context):
+
+    print(
+        "Received S3 event:"
+    )
+
+    print(
+        json.dumps(
+            event,
+            indent=2
+        )
+    )
+
+    try:
+
+        for record in event.get(
+            "Records",
+            []
+        ):
+
+            # --------------------------------
+            # Get S3 information
+            # --------------------------------
+
+            bucket_name = (
+                record["s3"]
+                ["bucket"]
+                ["name"]
+            )
+
+            object_key = urllib.parse.unquote_plus(
+                record["s3"]
+                ["object"]
+                ["key"]
+            )
+
+            print(
+                f"Processing: "
+                f"s3://{bucket_name}/{object_key}"
+            )
+
+            # --------------------------------
+            # Ignore anything outside pending/
+            # --------------------------------
+
+            if not object_key.startswith(
+                "pending/"
+            ):
+                print(
+                    "Ignoring object outside pending/"
+                )
+                continue
+
+            # --------------------------------
+            # Get S3 object
+            # --------------------------------
+
+            s3_response = s3.get_object(
+                Bucket=bucket_name,
+                Key=object_key
+            )
+
+            content = (
+                s3_response["Body"]
+                .read()
+                .decode("utf-8")
+            )
+
+            data = json.loads(content)
+
+            # --------------------------------
+            # Extract information
+            # --------------------------------
+
+            request_id = data[
+                "request_id"
+            ]
+
+            resume = data.get(
+                "resume",
+                ""
+            )
+
+            job_description = data.get(
+                "job_description",
+                ""
+            )
+
+            # --------------------------------
+            # Save PROCESSING status
+            # --------------------------------
+
+            table.put_item(
+                Item={
+                    "request_id": request_id,
+                    "status": "PROCESSING",
+                    "created_at": data.get(
+                        "created_at",
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                    )
+                }
+            )
+
+            # --------------------------------
+            # Create Bedrock prompt
+            # --------------------------------
+
+            prompt = f"""
+You are an expert Resume and ATS Analyzer.
+
+Analyze the candidate's resume against
+the provided job description.
+
+========================
+RESUME
+========================
+
+{resume}
+
+========================
+JOB DESCRIPTION
+========================
+
+{job_description}
+
+========================
+REQUIRED ANALYSIS
+========================
+
+Provide:
+
+1. ATS Compatibility Score
+Give a score from 0 to 100.
+
+2. Matching Skills
+Identify skills and technologies that match
+the job description.
+
+3. Missing Skills
+Identify important skills from the job
+description that are missing or weak.
+
+4. Resume Weaknesses
+Identify weaknesses that may reduce the
+candidate's chances of getting shortlisted.
+
+5. Recommendations
+Give specific and actionable recommendations
+to improve the resume for this job.
+
+6. Improved Professional Summary
+Write an improved professional summary
+tailored to the job description.
+
+7. Final Verdict
+Explain how well the candidate matches
+the role.
+
+Do not invent experience or skills.
+
+Use clear headings and bullet points.
+"""
+
+            # --------------------------------
+            # Bedrock request
+            # --------------------------------
+
+            request_body = {
+
+                "schemaVersion": "messages-v1",
+
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
+
+                "inferenceConfig": {
+                    "maxTokens": 2000,
+                    "temperature": 0.3,
+                    "topP": 0.9
+                }
+            }
+
+            # --------------------------------
+            # Invoke Bedrock
+            # --------------------------------
+
+            bedrock_response = (
+                bedrock.invoke_model(
+                    modelId=MODEL_ID,
+
+                    body=json.dumps(
+                        request_body
+                    ),
+
+                    contentType=
+                        "application/json",
+
+                    accept=
+                        "application/json"
+                )
+            )
+
+            # --------------------------------
+            # Read Bedrock response
+            # --------------------------------
+
+            response_body = json.loads(
+                bedrock_response["body"]
+                .read()
+            )
+
+            print(
+                "Bedrock response:"
+            )
+
+            print(
+                json.dumps(
+                    response_body,
+                    indent=2
+                )
+            )
+
+            # --------------------------------
+            # Extract analysis
+            # --------------------------------
+
+            analysis = (
+                response_body
+                ["output"]
+                ["message"]
+                ["content"][0]
+                ["text"]
+            )
+
+            # --------------------------------
+            # Store completed result
+            # --------------------------------
+
+            table.put_item(
+                Item={
+                    "request_id": request_id,
+
+                    "status": "COMPLETED",
+
+                    "analysis": analysis,
+
+                    "s3_key": object_key,
+
+                    "processed_at":
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                }
+            )
+
+            print(
+                f"Analysis completed: "
+                f"{request_id}"
+            )
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "success": True
+            })
+        }
+
+    except Exception as e:
+
+        print(
+            f"Analyzer ERROR: {str(e)}"
+        )
+
+        # If request_id is available,
+        # update DynamoDB to FAILED.
+        try:
+
+            if "request_id" in locals():
+
+                table.put_item(
+                    Item={
+                        "request_id":
+                            request_id,
+
+                        "status":
+                            "FAILED",
+
+                        "error":
+                            str(e),
+
+                        "processed_at":
+                            datetime.now(
+                                timezone.utc
+                            ).isoformat()
+                    }
+                )
+
+        except Exception as db_error:
+
+            print(
+                f"DynamoDB error: "
+                f"{str(db_error)}"
+            )
+
+        raise

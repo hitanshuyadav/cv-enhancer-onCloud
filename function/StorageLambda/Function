@@ -1,0 +1,108 @@
+import json
+import boto3
+import uuid
+from datetime import datetime, timezone
+
+s3 = boto3.client("s3")
+
+BUCKET_NAME = "storagebucketforcvenhancer"
+
+
+def lambda_handler(event, context):
+
+    try:
+        # Read request body
+        body = json.loads(event.get("body", "{}"))
+
+        resume = body.get("resume", "").strip()
+        job_description = body.get("job_description", "").strip()
+
+        # Validate input
+        if not resume:
+            return build_response(
+                400,
+                {
+                    "success": False,
+                    "message": "Resume is required"
+                }
+            )
+
+        if not job_description:
+            return build_response(
+                400,
+                {
+                    "success": False,
+                    "message": "Job description is required"
+                }
+            )
+
+        # Generate unique ID
+        request_id = str(uuid.uuid4())
+
+        created_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        # S3 object
+        s3_key = f"pending/{request_id}.json"
+
+        data = {
+            "request_id": request_id,
+            "created_at": created_at,
+            "resume": resume,
+            "job_description": job_description
+        }
+
+        # Store in S3
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(
+                data,
+                ensure_ascii=False
+            ).encode("utf-8"),
+            ContentType="application/json"
+        )
+
+        print(
+            f"Stored CV in S3: {s3_key}"
+        )
+
+        # Return immediately
+        return build_response(
+            200,
+            {
+                "success": True,
+                "message": "Resume submitted successfully",
+                "request_id": request_id,
+                "status": "PROCESSING"
+            }
+        )
+
+    except Exception as e:
+
+        print(f"ERROR: {str(e)}")
+
+        return build_response(
+            500,
+            {
+                "success": False,
+                "message": "Failed to submit resume"
+            }
+        )
+
+
+def build_response(status_code, body):
+
+    return {
+        "statusCode": status_code,
+
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Methods": "OPTIONS,POST"
+        },
+
+        "body": json.dumps(body)
+    }
