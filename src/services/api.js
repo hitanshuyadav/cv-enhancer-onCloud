@@ -1,5 +1,5 @@
 // Determine base URL: use /api Vite proxy during local development to bypass browser CORS OPTIONS preflight limits
-const API_DIRECT_URL = 'https://x37c06glcb.execute-api.ap-south-1.amazonaws.com';
+const API_DIRECT_URL = 'https://x37c06glcb.execute-api.ap-south-1.amazonaws.com/analyze-cv';
 const API_BASE_URL = typeof window !== 'undefined' && window.location.hostname === 'localhost'
   ? '/api'
   : API_DIRECT_URL;
